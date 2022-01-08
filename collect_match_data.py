@@ -1,3 +1,4 @@
+import csv
 import pickle
 from requests.sessions import session
 import steam.webauth as wa
@@ -13,23 +14,27 @@ from sklearn.metrics import confusion_matrix
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import roc_curve
 import numpy as np
+from itertools import product
 
+CF_CLEARANCE = 'ALNG.TfELa3npJvsbG1ur_NKO1ZOEwWNYwalquRnDK8-1641667303-0-150'
+MOZILLA_UA = 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:95.0) Gecko/20100101 Firefox/95.0'
 
 def calculate_kef(k1, k2):
     u_fee_reduce = 48
     fee_kef = 1 - (10 - u_fee_reduce * 1 / 100) / 100
     return round((k1*fee_kef/k2+1), 2)
 
+
 def login_steam():
     client = {'bookmaker_login': 'ft1w1mcx1', 'bookmaker_password': 'nyzpvnsd1'}
     user = wa.WebAuth(client['bookmaker_login'])
     session = user.login(client['bookmaker_password'])
 
-    head = {'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:95.0) Gecko/20100101 Firefox/95.0'}
+    head = {'User-Agent': MOZILLA_UA}
     session.headers.update(head)
     session.cookies.set(
         'cf_clearance', 
-        'YrvWlFVqhxBrkRYmC_BEkfOWr6nFW8ay_R_W5tocp7o-1641653059-0-150', 
+        CF_CLEARANCE, 
     )
 
     r = session.get('https://betscsgo.vip/login/')
@@ -48,54 +53,12 @@ def login_steam():
 
     sleep(2)
 
-    with open('match_data_session', 'w') as f:
+    with open('match_data_session', 'wb') as f:
         pickle.dump(session, f)
 
 
-def main(data_size, login=False):
-    if login:
-        login_steam()
-
-    with open('match_data_session', 'r') as f:
-        session = pickle.load(f)
-
-    dataframe = []
-
-    for i in range(1, data_size + 1):
-        print(f'Page{i} processed ...')
-
-        t = session.get(f'https://betscsgo.vip/history/{i}/').text
-        sleep(2)
-
-        beg_pos = t.find('var bets =') + len('var bets =')
-        end_pos = t.find("""$(function () {
-                if (bets.length == 0)""")
-
-        t = t[beg_pos : end_pos]
-        t = t[ : t.find(';')]
-
-        t = json.loads(t)
-            
-        for match in t:
-            if match['m_bets_a'] * match['m_bets_b'] == 0 :
-                continue
-
-            dataframe.append(
-                {
-                    'left_sum': match['m_bets_a'] / 100,
-                    'right_sum': match['m_bets_b'] / 100,
-                    'kef1': calculate_kef(match['m_bets_b'], match['m_bets_a']),
-                    'kef2': calculate_kef(match['m_bets_a'], match['m_bets_b']),
-                    'min_win': (match['m_status'] == '2' and match['m_bets_a'] > match['m_bets_b']) or (match['m_status'] == '3' and match['m_bets_a'] < match['m_bets_b']),
-                }
-            )
-    
-    print('Ended')
-    return dataframe
-
 def machine_learning_predict():
-    with open('match_data.json', 'r') as f:
-        df = pd.DataFrame(json.load(f))
+    df = pd.read_csv('match_data.csv')
 
     print('Размер выборки:', df.shape[0])
 
@@ -127,31 +90,151 @@ def machine_learning_predict():
     plt.legend(loc="lower right")
     plt.show()
 
-def load_data(data_size, login=False):
-    with open('match_data.json', 'w') as f:
-        json.dump(main(data_size, login), f, indent=4)
 
-def statistic_predict():
-    with open('match_data.json', 'r') as f:
-        df = pd.DataFrame(json.load(f))
-        df['min_kef'] = pd.Series(list(map(min, zip(df['kef1'], df['kef2']))))
+def load_data(data_size, login=False):
+    if login:
+        login_steam()
+
+    with open('match_data_session', 'rb') as f:
+        session = pickle.load(f)
+
+    with open('match_data.csv', 'w') as f:
+        Writer = csv.writer(f)
+        Writer.writerow(['left_sum', 'right_sum', 'kef1', 'kef2', 'min_win'])
+    
+        dataframe = []
+
+        for i in range(1, data_size + 1):
+            print(f'Page{i} processed ...')
+
+            t = session.get(f'https://betscsgo.vip/history/{i}/').text
+            sleep(2.2)
+
+            beg_pos = t.find('var bets =') + len('var bets =')
+            end_pos = t.find("""$(function () {
+                    if (bets.length == 0)""")
+
+            t = t[beg_pos : end_pos]
+            t = t[ : t.find(';')]
+
+            t = json.loads(t)
+                
+            for match in t:
+                if match['m_bets_a'] * match['m_bets_b'] == 0 :
+                    continue
+
+                dataframe.append(
+                    [
+                        match['m_bets_a'] / 100,
+                        match['m_bets_b'] / 100,
+                        calculate_kef(match['m_bets_b'], match['m_bets_a']),
+                        calculate_kef(match['m_bets_a'], match['m_bets_b']),
+                        (match['m_status'] == '2' and match['m_bets_a'] > match['m_bets_b']) or (match['m_status'] == '3' and match['m_bets_a'] < match['m_bets_b']),
+                    ]
+                )
+
+            if len(dataframe) > 100:
+                Writer.writerows(dataframe)
+                dataframe = []
+
+        Writer.writerows(dataframe)
+
+    print('Ended')
+
+def stat_pred_max_kef():
+    df = pd.read_csv('match_data.csv')
+    df['max_kef'] = pd.Series(list(map(max, zip(df['kef1'], df['kef2']))))
+    df['max_win'] = df['min_win'].apply(lambda x: not x)
+
+    best = {
+        'R_max': 0,
+        'a': 1.0,
+        'b': 20,
+        'p': 0,
+        'k': 0
+    }
+    def filter(df, a, b):
+        return df[(df['max_kef'] > a) & (df['max_kef'] < b)]
+    
+    N_DEL = 50
+    for (a, b) in product(list(np.linspace(1.1, 20, N_DEL)), list(np.linspace(1.1, 20, N_DEL))) :
+        if a >= b :
+            continue
+        df1 = filter(df, a, b)
+
+        number_of_min_win = df1['max_win'].apply(int)
+        
+        if not (True in number_of_min_win):
+            continue
+        # частотная оценка вероятности
+        p = sum(number_of_min_win) / len(number_of_min_win)
+        # средний к-т
+        k = df1[df1['max_win']]['max_kef'].mean()
+
+        R = k*p-1
+
+        if R > best['R_max']:
+            best['R_max'] = R
+            best['a'], best['b'] = a, b
+            best['p'], best['k'] = p, k
+
+    print(f"Чистая доходность={int(best['R_max'] * 100)}")
+    print(f"Достигнута на a={best['a']}, b={best['b']}")
+    if best['R_max'] > 0:
+        print(f"Доходность на выходе={((1+best['R_max']) * 0.95 - 1)*100}")
+        print(f"частотная оценка вероятности={best['p']}, средний к-т={best['k']}")
+
+    print(f"Стата для макс к-та")
+    result_sum = 0
+    for i in range(df.shape[0]):
+        result_sum += df['max_kef'][i] if df['max_win'].iloc[i] else -1
+
+    print(f"реальная доходность={(result_sum * 0.95 / df.shape[0] - 1)}\n")
+
+
+def stat_pred_min_kef():       
+    df = pd.read_csv('match_data.csv')
+    df['min_kef'] = pd.Series(list(map(min, zip(df['kef1'], df['kef2']))))
 
     def filter(df, a=1.0, b=2.0):
         return df[(df['min_kef'] > a) & (df['min_kef'] < b)]
 
-    df = filter(df, a=1.7)
+    best = {
+        'R_max': 0,
+        'a': 1.0,
+        'b': 2.0
+    }
+    N_DEL = 10
+    for (a, b) in product(list(np.linspace(1.1, 2.0, N_DEL)), list(np.linspace(1.1, 2.0, N_DEL))) :
+        if a >= b :
+            continue
+        df1 = filter(df, a, b)
 
-    number_of_min_win = df['min_win'].value_counts()
-    p = number_of_min_win.iloc[0] / (number_of_min_win.iloc[0] + number_of_min_win.iloc[1])
-    k = df['min_kef'].mean()
+        number_of_min_win = df1['min_win'].apply(int)
+        
+        if not (True in number_of_min_win):
+            continue
+        # частотная оценка вероятности
+        p = sum(number_of_min_win) / len(number_of_min_win)
+        # средний к-т
+        k = df1[df1['min_win']]['min_kef'].mean()
 
-    print(f'Частотная оценка вероятности={p}\nСредний к-т={k}')
-    R = k*p-1
-    print(f'Чистая доходность={int(R * 100)}')
-    if R > 0:
-        print(f'Доходность на выходе={(1+R) * 0,95}')
+        R = k*p-1
 
+        if R > best['R_max']:
+            best['R_max'] = R
+            best['a'], best['b'] = a, b
 
-load_data(1, login=True)
-#machine_learning_predict()
-statistic_predict()
+    print(f"Чистая доходность={int(best['R_max'] * 100)}")
+    print(f"Достигнута на a={best['a']}, b={best['b']}")
+    if best['R_max'] > 0:
+        print(f"Доходность на выходе={((1+best['R_max']) * 0.95 - 1)*100}")
+
+    print(f"Стата для мин к-та")
+    result_sum = 0
+    for i in range(df.shape[0]):
+        result_sum += df['min_kef'][i] if df['min_win'].iloc[i] else -1
+
+    print(f"реальная доходность={(result_sum * 0.95 / df.shape[0] - 1)}")
+
+stat_pred_min_kef()
